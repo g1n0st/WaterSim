@@ -78,34 +78,15 @@ class MGPCGSolver:
         #currently hard code solid velocities to zero
         for i, j in ti.ndrange(self.m, self.n):
             if self.cell_type[i, j] == utils.FLUID:
-                if self.cell_type[i - 1, j] == utils.SOLID:
+                if i == 0 or self.cell_type[i - 1, j] == utils.SOLID:
                     self.b[i, j] -= scale_b * (self.u[i, j] - 0)
-                if self.cell_type[i + 1, j] == utils.SOLID:
+                if i == self.m - 1 or self.cell_type[i + 1, j] == utils.SOLID:
                     self.b[i, j] += scale_b * (self.u[i + 1, j] - 0)
 
-                if self.cell_type[i, j - 1] == utils.SOLID:
+                if j == 0 or self.cell_type[i, j - 1] == utils.SOLID:
                     self.b[i, j] -= scale_b * (self.v[i, j] - 0)
-                if self.cell_type[i, j + 1] == utils.SOLID:
+                if j == self.n - 1 or self.cell_type[i, j + 1] == utils.SOLID:
                     self.b[i, j] += scale_b * (self.v[i, j + 1] - 0)
-
-        # define left handside of linear system
-        for i, j in ti.ndrange(self.m, self.n):
-            if self.cell_type[i, j] == utils.FLUID:
-                if self.cell_type[i - 1, j] == utils.FLUID:
-                    self.Adiag[0][i, j] += scale_A
-                if self.cell_type[i + 1, j] == utils.FLUID:
-                    self.Adiag[0][i, j] += scale_A
-                    self.Ax[0][i, j] = -scale_A
-                elif self.cell_type[i + 1, j] == utils.AIR:
-                    self.Adiag[0][i, j] += scale_A
-
-                if self.cell_type[i, j - 1] == utils.FLUID:
-                    self.Adiag[0][i, j] += scale_A
-                if self.cell_type[i, j + 1] == utils.FLUID:
-                    self.Adiag[0][i, j] += scale_A
-                    self.Ay[0][i, j] = -scale_A
-                elif self.cell_type[i, j + 1] == utils.AIR:
-                    self.Adiag[0][i, j] += scale_A
 
     @ti.kernel
     def gridtype_init(self, l: ti.template()):
@@ -167,17 +148,38 @@ class MGPCGSolver:
         self.system_init_kernel(scale_A, scale_b)
         self.grid_type[0].copy_from(self.cell_type)
 
-        for l in range(1, self.multigrid_level):
-            self.gridtype_init(l)
+        for l in range(self.multigrid_level):
+            if l > 0: self.gridtype_init(l)
             self.preconditioner_init(scale_A, l)
 
     @ti.func
     def neighbor_sum(self, Ax, Ay, z, nx, ny, i, j):
-        Az = Ax[(i - 1 + nx) % nx, j] * z[(i - 1 + nx) % nx, j] + Ax[i, j] * z[
-            (i + 1) % nx, j] + Ay[i, (j - 1 + ny) % ny] * z[
-                i, (j - 1 + ny) % ny] + Ay[i, j] * z[i, (j + 1) % ny]
+        Az = Ax[i - 1, j] * z[i - 1, j] + \
+        Ax[i, j] * z[i + 1, j] + \
+        Ay[i, j - 1] * z[i, j - 1] + \
+        Ay[i, j] * z[i, j + 1]
 
         return Az
+
+    '''
+    @ti.func
+    def neighbor_sum(self, Ax, Ay, z, nx, ny, i, j):
+        Az = (Ax[i - 1, j] * z[i - 1, j] if (i > 0) else 0.0) + \
+        (Ax[i, j] * z[i + 1, j] if (i < self.n) else 0.0) + \
+        (Ay[i, j - 1] * z[i, j - 1] if (j > 0) else 0.0) + \
+        (Ay[i, j] * z[i, j + 1] if (j < self.m) else 0.0)
+
+        return Az
+
+    @ti.func
+    def neighbor_sum(self, Ax, Ay, z, nx, ny, i, j):
+        Az = Ax[(i - 1 + nx) % nx, j] * z[(i - 1 + nx) % nx, j] +
+        Ax[i, j] * z[(i + 1) % nx, j] + 
+        Ay[i, (j - 1 + ny) % ny] * z[i, (j - 1 + ny) % ny] + 
+        Ay[i, j] * z[i, (j + 1) % ny]
+
+        return Az
+    '''
 
     @ti.kernel
     def smooth(self, l: ti.template(), phase: ti.i32):
@@ -198,7 +200,7 @@ class MGPCGSolver:
                                         j)
                 res = self.r[l][i, j] - Az
 
-                self.r[l + 1][i // 2, j // 2] += 0.25 * res
+                self.r[l + 1][i // 2, j // 2] += 0.5 * res
 
     @ti.kernel
     def prolongate(self, l: ti.template()):
@@ -208,7 +210,7 @@ class MGPCGSolver:
     def v_cycle(self):
         self.z[0].fill(0.0)
         for l in range(self.multigrid_level - 1):
-            for i in range(self.pre_and_post_smoothing):
+            for i in range(self.pre_and_post_smoothing << l):
                 self.smooth(l, 0)
                 self.smooth(l, 1)
 
@@ -223,7 +225,7 @@ class MGPCGSolver:
 
         for l in reversed(range(self.multigrid_level - 1)):
             self.prolongate(l)
-            for i in range(self.pre_and_post_smoothing):
+            for i in range(self.pre_and_post_smoothing << l):
                 self.smooth(l, 1)
                 self.smooth(l, 0)
 
